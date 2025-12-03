@@ -306,6 +306,14 @@ class GOSTConverter:
 
             heading_indices = {h['index'] for h in self.headings}
 
+            # Добавляем "СОДЕРЖАНИЕ" в самое начало
+            if self.headings:
+                self.add_heading_with_style("СОДЕРЖАНИЕ", target_doc, 1)
+                target_doc.add_paragraph()
+
+            # Флаг для отслеживания первого заголовка 1-го уровня после содержания
+            first_level1_after_toc = True
+
             # Собираем информацию о списках заранее для определения последнего элемента
             list_info = []
             for i, paragraph in enumerate(source_doc.paragraphs):
@@ -322,19 +330,15 @@ class GOSTConverter:
             # Определяем последний элемент каждого списка
             last_list_items = set()
             for idx, info in enumerate(list_info):
-                # Проверяем, является ли этот элемент последним в своем списке
                 is_last = True
                 current_type = info['type']
                 current_level = info['level']
 
-                # Проверяем следующие элементы
                 for next_idx in range(idx + 1, len(list_info)):
                     next_info = list_info[next_idx]
-                    # Если следующий элемент того же типа и уровня, то это не последний
                     if next_info['type'] == current_type and next_info['level'] == current_level:
                         is_last = False
                         break
-                    # Если следующий элемент другого типа или уровень изменился - прерываем проверку
                     if next_info['level'] <= current_level:
                         break
 
@@ -357,7 +361,18 @@ class GOSTConverter:
 
                 if i in heading_indices:
                     heading = next(h for h in self.headings if h['index'] == i)
-                    self.add_heading_with_style(heading['text'], target_doc, heading['level'])
+                    level = heading['level']
+
+                    # Добавляем разрыв страницы перед заголовком 1-го уровня
+                    # (кроме самого первого после содержания)
+                    if level == 1 and not first_level1_after_toc:
+                        target_doc.add_page_break()
+
+                    # После добавления первого заголовка 1-го уровня сбрасываем флаг
+                    if level == 1 and first_level1_after_toc:
+                        first_level1_after_toc = False
+
+                    self.add_heading_with_style(heading['text'], target_doc, level)
                     in_list = False
                     self.current_list_info = None
                 else:
@@ -379,10 +394,6 @@ class GOSTConverter:
             for i, table in enumerate(source_doc.tables):
                 self.add_table_with_caption_gost(table, target_doc, self.table_counter)
                 self.table_counter += 1
-
-            if self.headings:
-                target_doc.add_page_break()
-                self.add_heading_with_style("СОДЕРЖАНИЕ", target_doc, 1)
 
             target_doc.save(output_file)
             return True
