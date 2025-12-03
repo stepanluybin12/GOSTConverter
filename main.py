@@ -7,6 +7,8 @@ try:
     from docx.shared import Pt, Inches, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.enum.style import WD_STYLE_TYPE
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
 except ImportError as e:
     print(f"Ошибка импорта: {e}")
     input("Нажмите Enter для выхода...")
@@ -160,7 +162,7 @@ class GOSTConverter:
 
     def add_normal_text_gost(self, source_paragraph, target_doc):
         if not source_paragraph.text.strip():
-            return
+            return None
 
         paragraph = target_doc.add_paragraph()
 
@@ -246,6 +248,59 @@ class GOSTConverter:
         text = paragraph.text.strip().lower()
         return len(text) < 30 and any(word in text for word in ['рисун', 'изображен', 'фото', 'схем', 'график'])
 
+    def create_page_number_footer(self, section):
+        """
+        Создает футер с номером страницы
+        """
+        footer = section.footer
+
+        # Удаляем существующие параграфы в футере
+        for element in footer.paragraphs:
+            p = element._element
+            p.getparent().remove(p)
+
+        # Создаем новый параграф для номера страницы
+        paragraph = footer.add_paragraph()
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        # Добавляем поле номера страницы
+        run = paragraph.add_run()
+
+        # Создаем XML элементы для поля номера страницы
+        fldChar1 = OxmlElement('w:fldChar')
+        fldChar1.set(qn('w:fldCharType'), 'begin')
+
+        instrText = OxmlElement('w:instrText')
+        instrText.text = "PAGE"
+        instrText.set(qn('xml:space'), 'preserve')
+
+        fldChar2 = OxmlElement('w:fldChar')
+        fldChar2.set(qn('w:fldCharType'), 'end')
+
+        run._r.append(fldChar1)
+        run._r.append(instrText)
+        run._r.append(fldChar2)
+
+        # Форматирование номера страницы
+        run.font.name = 'Times New Roman'
+        run.font.size = Pt(12)
+        run.font.color.rgb = RGBColor(0, 0, 0)
+
+        # Устанавливаем отступы
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(0)
+
+    def add_page_numbers_to_document(self, doc):
+        """
+        Добавляет нумерацию страниц ко всем разделам документа
+        """
+        for section in doc.sections:
+            self.create_page_number_footer(section)
+
+        # Устанавливаем расстояние от текста до футера
+        for section in doc.sections:
+            section.footer_distance = Inches(0.3)
+
     def convert_document(self, input_file, output_file):
         try:
             source_doc = Document(input_file)
@@ -255,10 +310,13 @@ class GOSTConverter:
             self.create_styles(target_doc)
 
             section = target_doc.sections[0]
-            section.top_margin = Inches(0.79)
-            section.bottom_margin = Inches(0.79)
-            section.left_margin = Inches(1.18)
-            section.right_margin = Inches(0.39)
+            section.top_margin = Inches(0.79)  # 20 мм
+            section.bottom_margin = Inches(0.79)  # 20 мм
+            section.left_margin = Inches(1.18)  # 30 мм
+            section.right_margin = Inches(0.39)  # 10 мм
+
+            # Добавляем нумерацию страниц
+            self.add_page_numbers_to_document(target_doc)
 
             heading_indices = {h['index'] for h in self.headings}
 
