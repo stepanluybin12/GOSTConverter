@@ -9,6 +9,9 @@ try:
     from docx.enum.style import WD_STYLE_TYPE
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
+    from docx.oxml.text.paragraph import CT_P
+    from docx.oxml.table import CT_Tbl
+
 except ImportError as e:
     print(f"Ошибка импорта: {e}")
     input("Нажмите Enter для выхода...")
@@ -20,7 +23,12 @@ class GOSTConverter:
         self.headings = []
         self.image_counter = 1
         self.table_counter = 1
+        self.listing_counter = 1  # Счетчик листингов
         self.current_list_info = None
+        self.current_section_for_listing = 1  # Текущий раздел для нумерации
+        self.listing_detected = False  # Флаг обнаружения листинга
+        self.last_listing_number = None  # Последний номер листинга
+        self.section_numbers = {}  # Хранит номера разделов
 
     def detect_headings(self, doc):
         self.headings = []
@@ -158,6 +166,16 @@ class GOSTConverter:
         for run in p.runs:
             run.font.color.rgb = RGBColor(0, 0, 0)
 
+        # ОБНОВЛЯЕМ РАЗДЕЛ ДЛЯ НУМЕРАЦИИ ЛИСТИНГОВ
+        if level == 1:
+            # Извлекаем номер раздела из заголовка
+            match = re.match(r'^(\d+)', clean_text)
+            if match and not is_special:
+                self.current_section_for_listing = int(match.group(1))
+            elif is_special:
+                self.current_section_for_listing = 0  # Особые разделы без номера
+            self.listing_counter = 1  # Сбрасываем счетчик листингов
+
         return p
 
     def add_normal_text_gost(self, source_paragraph, target_doc):
@@ -288,6 +306,119 @@ class GOSTConverter:
         for section in doc.sections:
             section.footer_distance = Inches(0.3)
 
+    def is_courier_new_paragraph(self, paragraph):
+        """Проверяет, содержит ли абзац шрифт Courier New"""
+        if not paragraph.runs:
+            return False
+
+        for run in paragraph.runs:
+            if run.font.name:
+                # Проверяем различные варианты названия Courier New
+                font_name = run.font.name.lower()
+                if 'courier' in font_name:
+                    return True
+
+        # Также проверяем возможные стили кода
+        if paragraph.style and 'code' in paragraph.style.name.lower():
+            return True
+
+        return False
+
+    def is_listing_caption(self, paragraph):
+        """Проверяет, является ли абзац заголовком листинга"""
+        text = paragraph.text.strip().lower()
+        return 'листинг' in text or 'listing' in text
+
+    def add_listing_caption_gost(self, target_doc, listing_number, caption_text=""):
+        """Добавляет надпись листинга по ГОСТу (Таблица 8.1)"""
+
+        if caption_text and caption_text.strip():
+            # Убираем слово "Листинг" из текста, если оно уже есть
+            clean_caption = re.sub(r'^листинг\s*\d+(\.\d+)*\s*[—-]\s*', '', caption_text, flags=re.IGNORECASE)
+            clean_caption = re.sub(r'^listing\s*\d+(\.\d+)*\s*[—-]\s*', '', clean_caption, flags=re.IGNORECASE)
+            full_caption = f"Листинг {listing_number} — {clean_caption.strip()}"
+        else:
+            full_caption = f"Листинг {listing_number}"
+
+        # Создаем абзац для надписи
+        caption_para = target_doc.add_paragraph()
+
+        # Шрифт по ГОСТу: Times New Roman, 12 пт, курсив
+        caption_run = caption_para.add_run(full_caption)
+        caption_run.font.name = 'Times New Roman'
+        caption_run.font.size = Pt(12)
+        caption_run.font.italic = True
+        caption_run.font.color.rgb = RGBColor(0, 0, 0)
+
+        # Оформление абзаца по ГОСТу
+        pf = caption_para.paragraph_format
+        pf.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        pf.left_indent = Inches(0)
+        pf.right_indent = Inches(0)
+        pf.first_line_indent = Inches(0)
+        pf.space_before = Pt(6)  # 6 пт перед
+        pf.space_after = Pt(0)  # 0 мм после
+        pf.line_spacing = 1.0  # одинарный
+
+        return caption_para
+
+    def add_listing_content_gost(self, source_paragraph, target_doc):
+        """Добавляет содержание листинга по ГОСТу"""
+
+        # Создаем абзац для содержания листинга
+        listing_para = target_doc.add_paragraph()
+
+        # Копируем текст с сохранением форматирования runs
+        for run in source_paragraph.runs:
+            new_run = listing_para.add_run(run.text)
+            # Шрифт по ГОСТу: Courier New, 10 пт, обычный
+            new_run.font.name = 'Courier New'
+            new_run.font.size = Pt(10)
+            new_run.font.color.rgb = RGBColor(0, 0, 0)
+
+            # Сохраняем только обычное начертание (остальные убираем)
+            # ГОСТ требует "обычный" для содержания листинга
+            new_run.bold = False
+            new_run.italic = False
+            new_run.underline = False
+
+        # Оформление абзаца по ГОСТу
+        pf = listing_para.paragraph_format
+        pf.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        pf.left_indent = Inches(0)
+        pf.right_indent = Inches(0)
+        pf.first_line_indent = Inches(0)
+        pf.space_before = Pt(0)  # 0 мм перед
+        pf.space_after = Pt(0)  # 0 мм после
+        pf.line_spacing = 1.0  # одинарный
+
+        return listing_para
+
+    def process_listing_paragraph(self, source_paragraph, target_doc):
+        """Обрабатывает один абзац листинга"""
+
+        # Определяем номер листинга
+        if self.current_section_for_listing == 0:
+            # Для ненумерованных разделов (Введение, Заключение и т.д.)
+            listing_number = f"0.{self.listing_counter}"
+        else:
+            listing_number = f"{self.current_section_for_listing}.{self.listing_counter}"
+
+        self.last_listing_number = listing_number
+
+        # Проверяем предыдущий абзац на заголовок листинга
+        caption_text = ""
+
+        # Добавляем листинг
+        self.add_listing_caption_gost(target_doc, listing_number, caption_text)
+        self.add_listing_content_gost(source_paragraph, target_doc)
+
+        # Увеличиваем счетчик листингов
+        self.listing_counter += 1
+        self.listing_detected = True
+
+        return True
+
     def convert_document(self, input_file, output_file):
         try:
             source_doc = Document(input_file)
@@ -347,53 +478,104 @@ class GOSTConverter:
 
             in_list = False
             current_list_level = 0
+            self.listing_detected = False  # Сбрасываем флаг листинга
 
-            for i, paragraph in enumerate(source_doc.paragraphs):
-                text = paragraph.text.strip()
+            # Получаем все элементы документа в правильном порядке (параграфы и таблицы)
+            body_elements = list(source_doc.element.body)
+            element_index = 0
+            paragraph_index = 0
+            table_index = 0
 
-                if not text and not self.is_likely_image_paragraph(paragraph):
-                    continue
+            # Создаем список для хранения порядка элементов
+            ordered_elements = []
 
-                if self.is_likely_image_paragraph(paragraph):
-                    self.add_image_placeholder_gost(target_doc, self.image_counter)
-                    self.image_counter += 1
-                    continue
+            # Проходим по всем элементам body и определяем их тип и порядок
+            for elem in body_elements:
+                if isinstance(elem, CT_P):
+                    # Это параграф
+                    if paragraph_index < len(source_doc.paragraphs):
+                        ordered_elements.append({
+                            'type': 'paragraph',
+                            'element': source_doc.paragraphs[paragraph_index],
+                            'index': paragraph_index
+                        })
+                        paragraph_index += 1
+                elif isinstance(elem, CT_Tbl):
+                    # Это таблица
+                    if table_index < len(source_doc.tables):
+                        ordered_elements.append({
+                            'type': 'table',
+                            'element': source_doc.tables[table_index],
+                            'index': table_index
+                        })
+                        table_index += 1
 
-                if i in heading_indices:
-                    heading = next(h for h in self.headings if h['index'] == i)
-                    level = heading['level']
+            # Теперь обрабатываем элементы в правильном порядке
+            for element_info in ordered_elements:
+                if element_info['type'] == 'paragraph':
+                    paragraph = element_info['element']
+                    i = element_info['index']
+                    text = paragraph.text.strip()
 
-                    # Добавляем разрыв страницы перед заголовком 1-го уровня
-                    # (кроме самого первого после содержания)
-                    if level == 1 and not first_level1_after_toc:
-                        target_doc.add_page_break()
+                    # Пропускаем пустые абзацы, но сохраняем их в листингах
+                    if not text and not self.is_likely_image_paragraph(paragraph) and not self.is_courier_new_paragraph(
+                            paragraph):
+                        continue
 
-                    # После добавления первого заголовка 1-го уровня сбрасываем флаг
-                    if level == 1 and first_level1_after_toc:
-                        first_level1_after_toc = False
+                    if self.is_likely_image_paragraph(paragraph):
+                        self.add_image_placeholder_gost(target_doc, self.image_counter)
+                        self.image_counter += 1
+                        continue
 
-                    self.add_heading_with_style(heading['text'], target_doc, level)
-                    in_list = False
-                    self.current_list_info = None
-                else:
-                    if self.is_list_item(paragraph):
-                        list_level = self.get_list_hierarchy(paragraph)
-                        list_type = self.detect_list_type(paragraph)
-                        is_last = i in last_list_items
-                        self.add_list_item_gost(paragraph, target_doc, list_level, list_type, is_last)
-                        in_list = True
-                        current_list_level = list_level
+                    # ПРОВЕРКА НА ЛИСТИНГ (шрифт Courier New)
+                    if self.is_courier_new_paragraph(paragraph):
+                        self.process_listing_paragraph(paragraph, target_doc)
+                        continue
+
+                    if i in heading_indices:
+                        heading = next(h for h in self.headings if h['index'] == i)
+                        level = heading['level']
+
+                        # Добавляем разрыв страницы перед заголовком 1-го уровня
+                        # (кроме самого первого после содержания)
+                        if level == 1 and not first_level1_after_toc:
+                            target_doc.add_page_break()
+
+                        # После добавления первого заголовка 1-го уровня сбрасываем флаг
+                        if level == 1 and first_level1_after_toc:
+                            first_level1_after_toc = False
+
+                        self.add_heading_with_style(heading['text'], target_doc, level)
+                        in_list = False
+                        self.current_list_info = None
+                        self.listing_detected = False  # Сбрасываем флаг листинга при новом заголовке
                     else:
-                        if in_list:
-                            target_doc.add_paragraph()
-                            in_list = False
-                            self.current_list_info = None
+                        if self.is_list_item(paragraph):
+                            list_level = self.get_list_hierarchy(paragraph)
+                            list_type = self.detect_list_type(paragraph)
+                            is_last = i in last_list_items
+                            self.add_list_item_gost(paragraph, target_doc, list_level, list_type, is_last)
+                            in_list = True
+                            current_list_level = list_level
+                        else:
+                            if in_list:
+                                target_doc.add_paragraph()
+                                in_list = False
+                                self.current_list_info = None
 
-                        self.add_normal_text_gost(paragraph, target_doc)
+                            self.add_normal_text_gost(paragraph, target_doc)
+                            self.listing_detected = False  # Сбрасываем флаг листинга
 
-            for i, table in enumerate(source_doc.tables):
-                self.add_table_with_caption_gost(table, target_doc, self.table_counter)
-                self.table_counter += 1
+                elif element_info['type'] == 'table':
+                    table = element_info['element']
+
+                    # ПРОСТАЯ ПРОВЕРКА: если в таблице есть шрифт Courier New - это листинг
+                    if self.is_courier_new_table(table):
+                        self.process_listing_table(table, target_doc)
+                    else:
+                        # Иначе это обычная таблица
+                        self.add_table_with_caption_gost(table, target_doc, self.table_counter)
+                        self.table_counter += 1
 
             target_doc.save(output_file)
             return True
@@ -557,6 +739,49 @@ class GOSTConverter:
         pf.space_after = Pt(0)
 
         return paragraph
+
+    def is_courier_new_table(self, table):
+        """Проверяет, содержит ли таблица шрифт Courier New"""
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    if self.is_courier_new_paragraph(paragraph):
+                        return True
+        return False
+
+    def process_listing_table(self, table, target_doc):
+        """Обрабатывает таблицу как листинг"""
+        # Определяем номер листинга
+        if self.current_section_for_listing == 0:
+            listing_number = f"0.{self.listing_counter}"
+        else:
+            listing_number = f"{self.current_section_for_listing}.{self.listing_counter}"
+
+        # Создаем заголовок листинга
+        self.add_listing_caption_gost(target_doc, listing_number, "код программы")
+
+        # Извлекаем весь текст из таблицы
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    if paragraph.text.strip():  # Не обрабатываем пустые абзацы
+                        # Создаем временный параграф с текстом
+                        temp_doc = Document()
+                        temp_para = temp_doc.add_paragraph()
+
+                        # Копируем все runs для сохранения форматирования
+                        for run in paragraph.runs:
+                            new_run = temp_para.add_run(run.text)
+                            # Принудительно устанавливаем Courier New
+                            new_run.font.name = 'Courier New'
+                            new_run.font.size = Pt(10)
+
+                        # Обрабатываем как обычный листинг
+                        self.add_listing_content_gost(temp_para, target_doc)
+
+        # Увеличиваем счетчик
+        self.listing_counter += 1
+        self.listing_detected = True
 
 
 def main():
