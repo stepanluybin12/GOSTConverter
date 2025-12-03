@@ -20,15 +20,15 @@ class GOSTConverter:
         self.headings = []
         self.image_counter = 1
         self.table_counter = 1
+        self.current_list_info = None
 
     def detect_headings(self, doc):
         self.headings = []
 
         pattern = re.compile(
-            r'^(\d+(?:\.\d+)*)'
-            r'\.?'
-            r'\s*'
-            r'([А-ЯA-Z].*)'
+            r'^(\d+(?:\.\d+)*)'  # Номер (может быть многоуровневым: 1, 1.1, 1.1.1)
+            r'\s+'  # Один или более пробелов (НО НЕ ТОЧКА!)
+            r'([А-ЯA-Z].*)'  # Текст заголовка
             r'$',
             re.UNICODE
         )
@@ -249,24 +249,17 @@ class GOSTConverter:
         return len(text) < 30 and any(word in text for word in ['рисун', 'изображен', 'фото', 'схем', 'график'])
 
     def create_page_number_footer(self, section):
-        """
-        Создает футер с номером страницы
-        """
         footer = section.footer
 
-        # Удаляем существующие параграфы в футере
         for element in footer.paragraphs:
             p = element._element
             p.getparent().remove(p)
 
-        # Создаем новый параграф для номера страницы
         paragraph = footer.add_paragraph()
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-        # Добавляем поле номера страницы
         run = paragraph.add_run()
 
-        # Создаем XML элементы для поля номера страницы
         fldChar1 = OxmlElement('w:fldChar')
         fldChar1.set(qn('w:fldCharType'), 'begin')
 
@@ -281,23 +274,17 @@ class GOSTConverter:
         run._r.append(instrText)
         run._r.append(fldChar2)
 
-        # Форматирование номера страницы
         run.font.name = 'Times New Roman'
         run.font.size = Pt(12)
         run.font.color.rgb = RGBColor(0, 0, 0)
 
-        # Устанавливаем отступы
         paragraph.paragraph_format.space_before = Pt(0)
         paragraph.paragraph_format.space_after = Pt(0)
 
     def add_page_numbers_to_document(self, doc):
-        """
-        Добавляет нумерацию страниц ко всем разделам документа
-        """
         for section in doc.sections:
             self.create_page_number_footer(section)
 
-        # Устанавливаем расстояние от текста до футера
         for section in doc.sections:
             section.footer_distance = Inches(0.3)
 
@@ -310,15 +297,52 @@ class GOSTConverter:
             self.create_styles(target_doc)
 
             section = target_doc.sections[0]
-            section.top_margin = Inches(0.79)  # 20 мм
-            section.bottom_margin = Inches(0.79)  # 20 мм
-            section.left_margin = Inches(1.18)  # 30 мм
-            section.right_margin = Inches(0.39)  # 10 мм
+            section.top_margin = Inches(0.79)
+            section.bottom_margin = Inches(0.79)
+            section.left_margin = Inches(1.18)
+            section.right_margin = Inches(0.39)
 
-            # Добавляем нумерацию страниц
             self.add_page_numbers_to_document(target_doc)
 
             heading_indices = {h['index'] for h in self.headings}
+
+            # Собираем информацию о списках заранее для определения последнего элемента
+            list_info = []
+            for i, paragraph in enumerate(source_doc.paragraphs):
+                if self.is_list_item(paragraph):
+                    list_type = self.detect_list_type(paragraph)
+                    list_level = self.get_list_hierarchy(paragraph)
+                    list_info.append({
+                        'index': i,
+                        'type': list_type,
+                        'level': list_level,
+                        'paragraph': paragraph
+                    })
+
+            # Определяем последний элемент каждого списка
+            last_list_items = set()
+            for idx, info in enumerate(list_info):
+                # Проверяем, является ли этот элемент последним в своем списке
+                is_last = True
+                current_type = info['type']
+                current_level = info['level']
+
+                # Проверяем следующие элементы
+                for next_idx in range(idx + 1, len(list_info)):
+                    next_info = list_info[next_idx]
+                    # Если следующий элемент того же типа и уровня, то это не последний
+                    if next_info['type'] == current_type and next_info['level'] == current_level:
+                        is_last = False
+                        break
+                    # Если следующий элемент другого типа или уровень изменился - прерываем проверку
+                    if next_info['level'] <= current_level:
+                        break
+
+                if is_last:
+                    last_list_items.add(info['index'])
+
+            in_list = False
+            current_list_level = 0
 
             for i, paragraph in enumerate(source_doc.paragraphs):
                 text = paragraph.text.strip()
@@ -334,8 +358,23 @@ class GOSTConverter:
                 if i in heading_indices:
                     heading = next(h for h in self.headings if h['index'] == i)
                     self.add_heading_with_style(heading['text'], target_doc, heading['level'])
+                    in_list = False
+                    self.current_list_info = None
                 else:
-                    self.add_normal_text_gost(paragraph, target_doc)
+                    if self.is_list_item(paragraph):
+                        list_level = self.get_list_hierarchy(paragraph)
+                        list_type = self.detect_list_type(paragraph)
+                        is_last = i in last_list_items
+                        self.add_list_item_gost(paragraph, target_doc, list_level, list_type, is_last)
+                        in_list = True
+                        current_list_level = list_level
+                    else:
+                        if in_list:
+                            target_doc.add_paragraph()
+                            in_list = False
+                            self.current_list_info = None
+
+                        self.add_normal_text_gost(paragraph, target_doc)
 
             for i, table in enumerate(source_doc.tables):
                 self.add_table_with_caption_gost(table, target_doc, self.table_counter)
@@ -353,6 +392,160 @@ class GOSTConverter:
             import traceback
             traceback.print_exc()
             return False
+
+    def is_list_item(self, paragraph):
+        if paragraph._element.pPr is not None:
+            num_pr = paragraph._element.pPr.numPr
+            if num_pr is not None:
+                return True
+
+        text = paragraph.text.strip()
+
+        # ИСПРАВЛЕНИЕ 1: Проверяем нумерованные списки (с точкой после номера)
+        # Теперь ищем только формат "1. текст" или "1.1. текст" с точкой
+        if re.match(r'^\d+(?:\.\d+)*\.\s+', text):
+            return True
+
+        # Проверяем маркированные списки
+        if re.match(r'^[•\-—–]\s+', text):
+            return True
+
+        return False
+
+    def detect_list_type(self, paragraph):
+        """Определяет тип списка: 'numbered' или 'bulleted'"""
+        text = paragraph.text.strip()
+
+        # ИСПРАВЛЕНИЕ 2: Проверяем нумерованные списки только с точкой
+        if re.match(r'^\d+(?:\.\d+)*\.\s+', text):
+            return 'numbered'
+        elif re.match(r'^[•\-—–]\s+', text):
+            return 'bulleted'
+
+        # По стилю Word
+        if paragraph._element.pPr is not None:
+            num_pr = paragraph._element.pPr.numPr
+            if num_pr is not None:
+                # По умолчанию считаем маркированным
+                return 'bulleted'
+
+        return 'bulleted'
+
+    def get_list_hierarchy(self, paragraph):
+        if paragraph._element.pPr is not None:
+            num_pr = paragraph._element.pPr.numPr
+            if num_pr is not None and num_pr.ilvl is not None:
+                return num_pr.ilvl.val
+            elif num_pr is not None:
+                return 0
+
+        text = paragraph.text.strip()
+
+        # ИСПРАВЛЕНИЕ 3: Для нумерованных списков с вложенностью вида 1.1., 1.1.1. и т.д.
+        if re.match(r'^(\d+(?:\.\d+)+)\.\s+', text):
+            # Считаем уровень по количеству точек в номере
+            match = re.match(r'^(\d+(?:\.\d+)+)\.', text)
+            if match:
+                number_part = match.group(1)
+                return number_part.count('.') - 1  # 1.1 -> уровень 0, 1.1.1 -> уровень 1 и т.д.
+
+        return 0
+
+    def add_list_item_gost(self, source_paragraph, target_doc, list_hierarchy=0, list_type='bulleted', is_last=False):
+        """Добавляет элемент списка с использованием настоящих списков Word и правильными отступами по ГОСТу"""
+        text = source_paragraph.text.strip()
+
+        # Извлекаем чистый текст без маркера/номера
+        clean_text = text
+
+        if list_type == 'numbered':
+            # Удаляем номер в начале (например, "1. ", "1.1. ")
+            clean_text = re.sub(r'^\d+(?:\.\d+)*\.\s*', '', text)
+        elif list_type == 'bulleted':
+            # Удаляем маркер в начале
+            clean_text = re.sub(r'^[•\-—–]\s*', '', text)
+
+        # Форматирование по ГОСТу:
+        if clean_text:
+            if list_type == 'numbered':
+                # Нумерованный список: начинаем с прописной буквы
+                if clean_text and clean_text[0].isalpha():
+                    clean_text = clean_text[0].upper() + clean_text[1:]
+
+                # ИСПРАВЛЕНИЕ 4: Заканчиваем точкой (добавляем только если нет знака препинания)
+                # В нумерованных списках по ГОСТу всегда точка, не точка с запятой
+                if not clean_text.endswith(('.', '!', '?')):
+                    clean_text = clean_text + '.'
+            else:
+                # Маркированный список: начинаем с маленькой буквы
+                if clean_text and clean_text[0].isalpha():
+                    clean_text = clean_text[0].lower() + clean_text[1:]
+
+                # Заканчиваем точкой с запятой или точкой для последнего элемента
+                # Не добавляем точку с запятой, если уже есть знак препинания
+                if not clean_text.endswith(('.', '!', '?', ';')):
+                    if is_last:
+                        clean_text = clean_text + '.'
+                    else:
+                        clean_text = clean_text + ';'
+
+        # Создаем параграф с соответствующим стилем списка
+        if list_type == 'numbered':
+            # Нумерованный список
+            paragraph = target_doc.add_paragraph(style='List Number')
+            # Настраиваем уровень вложенности
+            if list_hierarchy > 0:
+                pPr = paragraph._element.get_or_add_pPr()
+                numPr = pPr.get_or_add_numPr()
+                ilvl = OxmlElement('w:ilvl')
+                ilvl.set(qn('w:val'), str(list_hierarchy))
+                numPr.append(ilvl)
+
+                # Устанавливаем numId для вложенных списков
+                numId = OxmlElement('w:numId')
+                numId.set(qn('w:val'), '1')
+                numPr.append(numId)
+        else:
+            # Маркированный список
+            paragraph = target_doc.add_paragraph(style='List Bullet')
+            if list_hierarchy > 0:
+                pPr = paragraph._element.get_or_add_pPr()
+                numPr = pPr.get_or_add_numPr()
+                ilvl = OxmlElement('w:ilvl')
+                ilvl.set(qn('w:val'), str(list_hierarchy))
+                numPr.append(ilvl)
+
+                numId = OxmlElement('w:numId')
+                numId.set(qn('w:val'), '2')
+                numPr.append(numId)
+
+        # Добавляем текст
+        run = paragraph.add_run(clean_text)
+        run.font.name = 'Times New Roman'
+        run.font.size = Pt(14)
+        run.font.color.rgb = RGBColor(0, 0, 0)
+
+        # Настраиваем форматирование параграфа
+        pf = paragraph.paragraph_format
+        pf.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        pf.line_spacing = 1.5
+
+        # Устанавливаем отступы по ГОСТу согласно таблице 4.1
+        # Положение маркера (номера): отступ 1,25 см = 0.49 дюйма
+        # Положение текста: отступ 2,25 см = 0.89 дюйма
+
+        # Вычисляем отступы в зависимости от уровня вложенности
+        # Для каждого следующего уровня добавляем 1,25 см (0.49 дюйма)
+        marker_indent = 0.49 + (0.49 * list_hierarchy)  # Положение маркера
+        text_indent = 0.89 + (0.49 * list_hierarchy)  # Положение текста
+
+        pf.left_indent = Inches(text_indent)  # Отступ текста
+        pf.first_line_indent = Inches(-(text_indent - marker_indent))  # Висячий отступ для маркера
+
+        pf.space_before = Pt(0)
+        pf.space_after = Pt(0)
+
+        return paragraph
 
 
 def main():
