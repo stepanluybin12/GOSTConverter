@@ -6,10 +6,10 @@ from docx.oxml.text.paragraph import CT_P
 from docx.oxml.table import CT_Tbl
 from docx.enum.section import WD_SECTION
 
-from .counters_manager import CountersManager
-from .element_recognizers import ElementRecognizer
-from .style_manager import StyleManager
-from .element_builders import ElementBuilder
+from counters_manager import CountersManager
+from element_recognizers import ElementRecognizer
+from style_manager import StyleManager
+from element_builders import ElementBuilder
 
 class GOSTConverter:
     def __init__(self):
