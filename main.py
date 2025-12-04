@@ -23,12 +23,16 @@ class GOSTConverter:
         self.headings = []
         self.image_counter = 1
         self.table_counter = 1
-        self.listing_counter = 1  # Счетчик листингов
+        self.listing_counter = 1
         self.current_list_info = None
-        self.current_section_for_listing = 1  # Текущий раздел для нумерации
-        self.listing_detected = False  # Флаг обнаружения листинга
-        self.last_listing_number = None  # Последний номер листинга
-        self.section_numbers = {}  # Хранит номера разделов
+        self.current_section_for_listing = 1
+        self.listing_detected = False
+        self.last_listing_number = None
+        self.section_numbers = {}
+        self.list_numbers = {}  # Хранит текущие номера для каждого уровня и типа списка
+        self.previous_list_paragraph_index = -1  # Индекс предыдущего параграфа списка
+        self.list_groups = []  # Группы связанных списковых элементов
+        self.current_list_group_id = 0  # ID текущей группы списков
 
     def detect_headings(self, doc):
         self.headings = []
@@ -37,9 +41,9 @@ class GOSTConverter:
                           "СПИСОК ЛИТЕРАТУРЫ", "ПРИЛОЖЕНИЯ"}
 
         pattern = re.compile(
-            r'^(\d+(?:\.\d+)*)'  # Номер (может быть многоуровневым: 1, 1.1, 1.1.1)
-            r'\s+'  # Один или более пробелов
-            r'([А-ЯA-Z].*)'  # Текст заголовка
+            r'^(\d+(?:\.\d+)*)'
+            r'\s+'
+            r'([А-ЯA-Z].*)'
             r'$',
             re.UNICODE
         )
@@ -49,7 +53,6 @@ class GOSTConverter:
             if not raw_text:
                 continue
 
-            # Проверка на специальные заголовки БЕЗ номера
             if raw_text.upper() in SPECIAL_TITLES:
                 self.headings.append({
                     'text': raw_text,
@@ -66,9 +69,7 @@ class GOSTConverter:
             number_part = match.group(1)
             title_text = match.group(2).strip()
 
-            # Проверяем, не является ли заголовок специальным даже с номером
             if title_text.upper() in SPECIAL_TITLES:
-                # Для специальных заголовков уровень всегда 1
                 level = 1
             else:
                 if not title_text[0].isupper():
@@ -156,20 +157,16 @@ class GOSTConverter:
 
         clean_text = text.strip()
 
-        # Проверяем, является ли это специальным заголовком
         is_special = clean_text.upper() in SPECIAL_TITLES
 
-        # Если заголовок содержит номер, извлекаем его
         title_part = clean_text
         if not is_special and ' ' in clean_text:
-            # Проверяем формат "1. ВВЕДЕНИЕ" или "ВВЕДЕНИЕ"
             parts = clean_text.split(' ', 1)
             if parts[0].replace('.', '').isdigit():
                 title_part = parts[1] if len(parts) > 1 else parts[0]
             else:
                 title_part = clean_text
 
-        # Проверяем, является ли заголовок специальным (с номером или без)
         if title_part.upper() in SPECIAL_TITLES:
             is_special = True
 
@@ -201,16 +198,20 @@ class GOSTConverter:
         for run in p.runs:
             run.font.color.rgb = RGBColor(0, 0, 0)
 
-        # Обновляем текущий раздел для нумерации листингов
         if level == 1 and not is_special:
-            # Извлекаем номер раздела из заголовка
             match = re.match(r'^(\d+)', clean_text)
             if match:
                 self.current_section_for_listing = int(match.group(1))
-                self.listing_counter = 1  # Сбрасываем счетчик листингов
+                self.listing_counter = 1
+                # Сбрасываем группы списков при новом разделе
+                self.list_groups = []
+                self.current_list_group_id = 0
         elif is_special:
-            self.current_section_for_listing = 0  # Особые разделы без номера
-            self.listing_counter = 1  # Сбрасываем счетчик листингов
+            self.current_section_for_listing = 0
+            self.listing_counter = 1
+            # Сбрасываем группы списков при специальном разделе
+            self.list_groups = []
+            self.current_list_group_id = 0
 
         return p
 
@@ -343,113 +344,87 @@ class GOSTConverter:
             section.footer_distance = Inches(0.3)
 
     def is_courier_new_paragraph(self, paragraph):
-        """Проверяет, содержит ли абзац шрифт Courier New"""
         if not paragraph.runs:
             return False
 
         for run in paragraph.runs:
             if run.font.name:
-                # Проверяем различные варианты названия Courier New
                 font_name = run.font.name.lower()
                 if 'courier' in font_name:
                     return True
 
-        # Также проверяем возможные стили кода
         if paragraph.style and 'code' in paragraph.style.name.lower():
             return True
 
         return False
 
     def is_listing_caption(self, paragraph):
-        """Проверяет, является ли абзац заголовком листинга"""
         text = paragraph.text.strip().lower()
         return 'листинг' in text or 'listing' in text
 
     def add_listing_caption_gost(self, target_doc, listing_number, caption_text=""):
-        """Добавляет надпись листинга по ГОСТу (Таблица 8.1)"""
-
         if caption_text and caption_text.strip():
-            # Убираем слово "Листинг" из текста, если оно уже есть
             clean_caption = re.sub(r'^листинг\s*\d+(\.\d+)*\s*[—-]\s*', '', caption_text, flags=re.IGNORECASE)
             clean_caption = re.sub(r'^listing\s*\d+(\.\d+)*\s*[—-]\s*', '', clean_caption, flags=re.IGNORECASE)
             full_caption = f"Листинг {listing_number} — {clean_caption.strip()}"
         else:
             full_caption = f"Листинг {listing_number}"
 
-        # Создаем абзац для надписи
         caption_para = target_doc.add_paragraph()
 
-        # Шрифт по ГОСТу: Times New Roman, 12 пт, курсив
         caption_run = caption_para.add_run(full_caption)
         caption_run.font.name = 'Times New Roman'
         caption_run.font.size = Pt(12)
         caption_run.font.italic = True
         caption_run.font.color.rgb = RGBColor(0, 0, 0)
 
-        # Оформление абзаца по ГОСТу
         pf = caption_para.paragraph_format
         pf.alignment = WD_ALIGN_PARAGRAPH.LEFT
         pf.left_indent = Inches(0)
         pf.right_indent = Inches(0)
         pf.first_line_indent = Inches(0)
-        pf.space_before = Pt(6)  # 6 пт перед
-        pf.space_after = Pt(0)  # 0 мм после
-        pf.line_spacing = 1.0  # одинарный
+        pf.space_before = Pt(6)
+        pf.space_after = Pt(0)
+        pf.line_spacing = 1.0
 
         return caption_para
 
     def add_listing_content_gost(self, source_paragraph, target_doc):
-        """Добавляет содержание листинга по ГОСТу"""
-
-        # Создаем абзац для содержания листинга
         listing_para = target_doc.add_paragraph()
 
-        # Копируем текст с сохранением форматирования runs
         for run in source_paragraph.runs:
             new_run = listing_para.add_run(run.text)
-            # Шрифт по ГОСТу: Courier New, 10 пт, обычный
             new_run.font.name = 'Courier New'
             new_run.font.size = Pt(10)
             new_run.font.color.rgb = RGBColor(0, 0, 0)
-
-            # Сохраняем только обычное начертание (остальные убираем)
-            # ГОСТ требует "обычный" для содержания листинга
             new_run.bold = False
             new_run.italic = False
             new_run.underline = False
 
-        # Оформление абзаца по ГОСТу
         pf = listing_para.paragraph_format
         pf.alignment = WD_ALIGN_PARAGRAPH.LEFT
         pf.left_indent = Inches(0)
         pf.right_indent = Inches(0)
         pf.first_line_indent = Inches(0)
-        pf.space_before = Pt(0)  # 0 мм перед
-        pf.space_after = Pt(0)  # 0 мм после
-        pf.line_spacing = 1.0  # одинарный
+        pf.space_before = Pt(0)
+        pf.space_after = Pt(0)
+        pf.line_spacing = 1.0
 
         return listing_para
 
     def process_listing_paragraph(self, source_paragraph, target_doc):
-        """Обрабатывает один абзац листинга"""
-
-        # Определяем номер листинга
         if self.current_section_for_listing == 0:
-            # Для ненумерованных разделов (Введение, Заключение и т.д.)
             listing_number = f"0.{self.listing_counter}"
         else:
             listing_number = f"{self.current_section_for_listing}.{self.listing_counter}"
 
         self.last_listing_number = listing_number
 
-        # Проверяем предыдущий абзац на заголовок листинга
         caption_text = ""
 
-        # Добавляем листинг
         self.add_listing_caption_gost(target_doc, listing_number, caption_text)
         self.add_listing_content_gost(source_paragraph, target_doc)
 
-        # Увеличиваем счетчик листингов
         self.listing_counter += 1
         self.listing_detected = True
 
@@ -478,57 +453,97 @@ class GOSTConverter:
                 self.add_heading_with_style("СОДЕРЖАНИЕ", target_doc, 1)
                 target_doc.add_paragraph()
 
-            # Флаг для отслеживания первого заголовка 1-го уровня после содержания
             first_level1_after_toc = True
 
-            # Собираем информацию о списках заранее для определения последнего элемента
+            # Сначала анализируем структуру списков
             list_info = []
             for i, paragraph in enumerate(source_doc.paragraphs):
                 if self.is_list_item(paragraph):
                     list_type = self.detect_list_type(paragraph)
                     list_level = self.get_list_hierarchy(paragraph)
+
+                    # Определяем, является ли это началом нового списка
+                    is_start_of_new_list = False
+                    if list_type == 'numbered':
+                        # Проверяем, начинается ли с 1
+                        text = paragraph.text.strip()
+                        if text.startswith('1.') and list_level == 0:
+                            # Проверяем, был ли до этого обычный текст или другой список
+                            if i == 0:
+                                is_start_of_new_list = True
+                            else:
+                                # Проверяем предыдущий элемент
+                                prev_paragraph = source_doc.paragraphs[i - 1]
+                                if not self.is_list_item(prev_paragraph):
+                                    is_start_of_new_list = True
+
                     list_info.append({
                         'index': i,
                         'type': list_type,
                         'level': list_level,
-                        'paragraph': paragraph
+                        'paragraph': paragraph,
+                        'is_start_of_new_list': is_start_of_new_list,
+                        'list_id': None  # Будет заполнено позже
                     })
 
-            # Определяем последний элемент каждого списка
+            # Группируем связанные элементы списков
+            current_list_id = 0
+            for idx, info in enumerate(list_info):
+                if idx == 0:
+                    # Первый элемент списка всегда начинает новую группу
+                    info['list_id'] = current_list_id
+                    current_list_id += 1
+                else:
+                    prev_info = list_info[idx - 1]
+
+                    # Проверяем, является ли это продолжением предыдущего списка
+                    if (info['is_start_of_new_list'] or
+                            info['type'] != prev_info['type'] or
+                            info['level'] < prev_info['level']):
+                        # Начинаем новую группу
+                        info['list_id'] = current_list_id
+                        current_list_id += 1
+                    else:
+                        # Продолжаем предыдущую группу
+                        info['list_id'] = prev_info['list_id']
+
+            # Определяем последний элемент каждой группы
             last_list_items = set()
             for idx, info in enumerate(list_info):
                 is_last = True
-                current_type = info['type']
-                current_level = info['level']
-
                 for next_idx in range(idx + 1, len(list_info)):
                     next_info = list_info[next_idx]
-                    if next_info['type'] == current_type and next_info['level'] == current_level:
+                    if next_info['list_id'] == info['list_id']:
                         is_last = False
-                        break
-                    if next_info['level'] <= current_level:
                         break
 
                 if is_last:
                     last_list_items.add(info['index'])
 
+            # Создаем числовые определения для разных групп списков
+            num_counter = 3  # Начинаем с 3, так как 1 и 2 уже используются
+
+            # Собираем уникальные группы
+            unique_groups = set(info['list_id'] for info in list_info)
+            group_num_ids = {}
+            for group_id in unique_groups:
+                if group_id is not None:
+                    group_num_ids[group_id] = num_counter
+                    num_counter += 1
+
             in_list = False
             current_list_level = 0
-            self.listing_detected = False  # Сбрасываем флаг листинга
+            self.listing_detected = False
 
-            # Получаем все элементы документа в правильном порядке (параграфы и таблицы)
             body_elements = list(source_doc.element.body)
             element_index = 0
             paragraph_index = 0
             table_index = 0
 
-            # Создаем список для хранения порядка элементов
             ordered_elements = []
 
-            # Проходим по всем элементам body и определяем их тип и порядок
             for elem in body_elements:
                 if isinstance(elem, CT_P):
-                    # Это параграф
                     if paragraph_index < len(source_doc.paragraphs):
                         ordered_elements.append({
                             'type': 'paragraph',
@@ -537,7 +552,6 @@ class GOSTConverter:
                         })
                         paragraph_index += 1
                 elif isinstance(elem, CT_Tbl):
-                    # Это таблица
                     if table_index < len(source_doc.tables):
                         ordered_elements.append({
                             'type': 'table',
@@ -546,14 +560,12 @@ class GOSTConverter:
                         })
                         table_index += 1
 
-            # Теперь обрабатываем элементы в правильном порядке
             for element_info in ordered_elements:
                 if element_info['type'] == 'paragraph':
                     paragraph = element_info['element']
                     i = element_info['index']
                     text = paragraph.text.strip()
 
-                    # Пропускаем пустые абзацы, но сохраняем их в листингах
                     if not text and not self.is_likely_image_paragraph(paragraph) and not self.is_courier_new_paragraph(
                             paragraph):
                         continue
@@ -563,7 +575,6 @@ class GOSTConverter:
                         self.image_counter += 1
                         continue
 
-                    # ПРОВЕРКА НА ЛИСТИНГ (шрифт Courier New)
                     if self.is_courier_new_paragraph(paragraph):
                         self.process_listing_paragraph(paragraph, target_doc)
                         continue
@@ -572,25 +583,32 @@ class GOSTConverter:
                         heading = next(h for h in self.headings if h['index'] == i)
                         level = heading['level']
 
-                        # Добавляем разрыв страницы перед заголовком 1-го уровня
-                        # (кроме самого первого после содержания)
                         if level == 1 and not first_level1_after_toc:
                             target_doc.add_page_break()
 
-                        # После добавления первого заголовка 1-го уровня сбрасываем флаг
                         if level == 1 and first_level1_after_toc:
                             first_level1_after_toc = False
 
                         self.add_heading_with_style(heading['text'], target_doc, level)
                         in_list = False
                         self.current_list_info = None
-                        self.listing_detected = False  # Сбрасываем флаг листинга при новом заголовке
+                        self.listing_detected = False
                     else:
                         if self.is_list_item(paragraph):
                             list_level = self.get_list_hierarchy(paragraph)
                             list_type = self.detect_list_type(paragraph)
+
+                            # Находим информацию о группе для этого элемента
+                            list_item_info = next((info for info in list_info if info['index'] == i), None)
                             is_last = i in last_list_items
-                            self.add_list_item_gost(paragraph, target_doc, list_level, list_type, is_last)
+
+                            if list_item_info:
+                                group_id = list_item_info['list_id']
+                                self.add_list_item_gost(paragraph, target_doc, list_level, list_type, is_last, group_id,
+                                                        group_num_ids.get(group_id))
+                            else:
+                                self.add_list_item_gost(paragraph, target_doc, list_level, list_type, is_last)
+
                             in_list = True
                             current_list_level = list_level
                         else:
@@ -600,16 +618,14 @@ class GOSTConverter:
                                 self.current_list_info = None
 
                             self.add_normal_text_gost(paragraph, target_doc)
-                            self.listing_detected = False  # Сбрасываем флаг листинга
+                            self.listing_detected = False
 
                 elif element_info['type'] == 'table':
                     table = element_info['element']
 
-                    # ПРОСТАЯ ПРОВЕРКА: если в таблице есть шрифт Courier New - это листинг
                     if self.is_courier_new_table(table):
                         self.process_listing_table(table, target_doc)
                     else:
-                        # Иначе это обычная таблица
                         self.add_table_with_caption_gost(table, target_doc, self.table_counter)
                         self.table_counter += 1
 
@@ -630,32 +646,30 @@ class GOSTConverter:
 
         text = paragraph.text.strip()
 
-        # ИСПРАВЛЕНИЕ 1: Проверяем нумерованные списки (с точкой после номера)
-        # Теперь ищем только формат "1. текст" или "1.1. текст" с точкой
         if re.match(r'^\d+(?:\.\d+)*\.\s+', text):
             return True
 
-        # Проверяем маркированные списки
         if re.match(r'^[•\-—–]\s+', text):
             return True
 
         return False
 
     def detect_list_type(self, paragraph):
-        """Определяет тип списка: 'numbered' или 'bulleted'"""
         text = paragraph.text.strip()
 
-        # ИСПРАВЛЕНИЕ 2: Проверяем нумерованные списки только с точкой
+        # Принудительная проверка для первого элемента
+        # Если начинается с "1." - это точно нумерованный список
+        if re.match(r'^1\.\s+', text):
+            return 'numbered'
+
         if re.match(r'^\d+(?:\.\d+)*\.\s+', text):
             return 'numbered'
         elif re.match(r'^[•\-—–]\s+', text):
             return 'bulleted'
 
-        # По стилю Word
         if paragraph._element.pPr is not None:
             num_pr = paragraph._element.pPr.numPr
             if num_pr is not None:
-                # По умолчанию считаем маркированным
                 return 'bulleted'
 
         return 'bulleted'
@@ -670,72 +684,83 @@ class GOSTConverter:
 
         text = paragraph.text.strip()
 
-        # ИСПРАВЛЕНИЕ 3: Для нумерованных списков с вложенностью вида 1.1., 1.1.1. и т.д.
         if re.match(r'^(\d+(?:\.\d+)+)\.\s+', text):
-            # Считаем уровень по количеству точек в номере
             match = re.match(r'^(\d+(?:\.\d+)+)\.', text)
             if match:
                 number_part = match.group(1)
-                return number_part.count('.') - 1  # 1.1 -> уровень 0, 1.1.1 -> уровень 1 и т.д.
+                return number_part.count('.') - 1
 
         return 0
 
-    def add_list_item_gost(self, source_paragraph, target_doc, list_hierarchy=0, list_type='bulleted', is_last=False):
-        """Добавляет элемент списка с использованием настоящих списков Word и правильными отступами по ГОСТу"""
+    def add_list_item_gost(self, source_paragraph, target_doc, list_hierarchy=0, list_type='bulleted', is_last=False,
+                           group_id=None, num_id=None):
+        """Добавляет элемент списка с независимой нумерацией для каждой группы"""
         text = source_paragraph.text.strip()
 
-        # Извлекаем чистый текст без маркера/номера
         clean_text = text
 
         if list_type == 'numbered':
-            # Удаляем номер в начале (например, "1. ", "1.1. ")
-            clean_text = re.sub(r'^\d+(?:\.\d+)*\.\s*', '', text)
+            # Извлекаем номер из исходного текста
+            match = re.match(r'^(\d+(?:\.\d+)*)\.\s*(.*)', text)
+            if match:
+                original_number = match.group(1)
+                clean_text = match.group(2)
+            else:
+                clean_text = re.sub(r'^\d+(?:\.\d+)*\.\s*', '', text)
         elif list_type == 'bulleted':
-            # Удаляем маркер в начале
             clean_text = re.sub(r'^[•\-—–]\s*', '', text)
 
         # Форматирование по ГОСТу:
         if clean_text:
             if list_type == 'numbered':
-                # Нумерованный список: начинаем с прописной буквы
                 if clean_text and clean_text[0].isalpha():
                     clean_text = clean_text[0].upper() + clean_text[1:]
 
-                # ИСПРАВЛЕНИЕ 4: Заканчиваем точкой (добавляем только если нет знака препинания)
-                # В нумерованных списках по ГОСТу всегда точка, не точка с запятой
                 if not clean_text.endswith(('.', '!', '?')):
                     clean_text = clean_text + '.'
             else:
-                # Маркированный список: начинаем с маленькой буквы
                 if clean_text and clean_text[0].isalpha():
                     clean_text = clean_text[0].lower() + clean_text[1:]
 
-                # Заканчиваем точкой с запятой или точкой для последнего элемента
-                # Не добавляем точку с запятой, если уже есть знак препинания
                 if not clean_text.endswith(('.', '!', '?', ';')):
                     if is_last:
                         clean_text = clean_text + '.'
                     else:
                         clean_text = clean_text + ';'
 
-        # Создаем параграф с соответствующим стилем списка
+        # Создаем параграф
         if list_type == 'numbered':
-            # Нумерованный список
-            paragraph = target_doc.add_paragraph(style='List Number')
-            # Настраиваем уровень вложенности
-            if list_hierarchy > 0:
+            paragraph = target_doc.add_paragraph()
+
+            # Используем указанный num_id или создаем новый
+            if num_id is None:
+                # Если группа не указана, создаем временную нумерацию
                 pPr = paragraph._element.get_or_add_pPr()
                 numPr = pPr.get_or_add_numPr()
+
+                # Создаем новую нумерацию для этой группы
                 ilvl = OxmlElement('w:ilvl')
                 ilvl.set(qn('w:val'), str(list_hierarchy))
                 numPr.append(ilvl)
 
-                # Устанавливаем numId для вложенных списков
                 numId = OxmlElement('w:numId')
-                numId.set(qn('w:val'), '1')
+                # Используем высокий номер, чтобы не конфликтовать со стандартными
+                numId.set(qn('w:val'), str(1000 + (group_id if group_id is not None else 0)))
+                numPr.append(numId)
+            else:
+                # Используем существующий numId для группы
+                pPr = paragraph._element.get_or_add_pPr()
+                numPr = pPr.get_or_add_numPr()
+
+                ilvl = OxmlElement('w:ilvl')
+                ilvl.set(qn('w:val'), str(list_hierarchy))
+                numPr.append(ilvl)
+
+                numId = OxmlElement('w:numId')
+                numId.set(qn('w:val'), str(num_id))
                 numPr.append(numId)
         else:
-            # Маркированный список
+            # Маркированные списки всегда используют один стиль
             paragraph = target_doc.add_paragraph(style='List Bullet')
             if list_hierarchy > 0:
                 pPr = paragraph._element.get_or_add_pPr()
@@ -759,17 +784,11 @@ class GOSTConverter:
         pf.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         pf.line_spacing = 1.5
 
-        # Устанавливаем отступы по ГОСТу согласно таблице 4.1
-        # Положение маркера (номера): отступ 1,25 см = 0.49 дюйма
-        # Положение текста: отступ 2,25 см = 0.89 дюйма
+        marker_indent = 0.49 + (0.49 * list_hierarchy)
+        text_indent = 0.89 + (0.49 * list_hierarchy)
 
-        # Вычисляем отступы в зависимости от уровня вложенности
-        # Для каждого следующего уровня добавляем 1,25 см (0.49 дюйма)
-        marker_indent = 0.49 + (0.49 * list_hierarchy)  # Положение маркера
-        text_indent = 0.89 + (0.49 * list_hierarchy)  # Положение текста
-
-        pf.left_indent = Inches(text_indent)  # Отступ текста
-        pf.first_line_indent = Inches(-(text_indent - marker_indent))  # Висячий отступ для маркера
+        pf.left_indent = Inches(text_indent)
+        pf.first_line_indent = Inches(-(text_indent - marker_indent))
 
         pf.space_before = Pt(0)
         pf.space_after = Pt(0)
@@ -777,7 +796,6 @@ class GOSTConverter:
         return paragraph
 
     def is_courier_new_table(self, table):
-        """Проверяет, содержит ли таблица шрифт Courier New"""
         for row in table.rows:
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
@@ -786,36 +804,27 @@ class GOSTConverter:
         return False
 
     def process_listing_table(self, table, target_doc):
-        """Обрабатывает таблицу как листинг"""
-        # Определяем номер листинга
         if self.current_section_for_listing == 0:
             listing_number = f"0.{self.listing_counter}"
         else:
             listing_number = f"{self.current_section_for_listing}.{self.listing_counter}"
 
-        # Создаем заголовок листинга
         self.add_listing_caption_gost(target_doc, listing_number, "код программы")
 
-        # Извлекаем весь текст из таблицы
         for row in table.rows:
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
-                    if paragraph.text.strip():  # Не обрабатываем пустые абзацы
-                        # Создаем временный параграф с текстом
+                    if paragraph.text.strip():
                         temp_doc = Document()
                         temp_para = temp_doc.add_paragraph()
 
-                        # Копируем все runs для сохранения форматирования
                         for run in paragraph.runs:
                             new_run = temp_para.add_run(run.text)
-                            # Принудительно устанавливаем Courier New
                             new_run.font.name = 'Courier New'
                             new_run.font.size = Pt(10)
 
-                        # Обрабатываем как обычный листинг
                         self.add_listing_content_gost(temp_para, target_doc)
 
-        # Увеличиваем счетчик
         self.listing_counter += 1
         self.listing_detected = True
 
