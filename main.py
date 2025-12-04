@@ -32,10 +32,13 @@ class GOSTConverter:
 
     def detect_headings(self, doc):
         self.headings = []
+        SPECIAL_TITLES = {"СОДЕРЖАНИЕ", "ВВЕДЕНИЕ", "ЗАКЛЮЧЕНИЕ",
+                          "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ",
+                          "СПИСОК ЛИТЕРАТУРЫ", "ПРИЛОЖЕНИЯ"}
 
         pattern = re.compile(
             r'^(\d+(?:\.\d+)*)'  # Номер (может быть многоуровневым: 1, 1.1, 1.1.1)
-            r'\s+'  # Один или более пробелов (НО НЕ ТОЧКА!)
+            r'\s+'  # Один или более пробелов
             r'([А-ЯA-Z].*)'  # Текст заголовка
             r'$',
             re.UNICODE
@@ -46,6 +49,16 @@ class GOSTConverter:
             if not raw_text:
                 continue
 
+            # Проверка на специальные заголовки БЕЗ номера
+            if raw_text.upper() in SPECIAL_TITLES:
+                self.headings.append({
+                    'text': raw_text,
+                    'level': 1,
+                    'index': i,
+                    'original_paragraph': paragraph
+                })
+                continue
+
             match = pattern.match(raw_text)
             if not match:
                 continue
@@ -53,18 +66,23 @@ class GOSTConverter:
             number_part = match.group(1)
             title_text = match.group(2).strip()
 
-            if not title_text[0].isupper():
-                continue
-            if len(title_text) < 3:
-                continue
-            if title_text.lower().startswith(('в ', 'на ', 'по ', 'из ', 'от ', 'к ', 'с ')):
-                continue
+            # Проверяем, не является ли заголовок специальным даже с номером
+            if title_text.upper() in SPECIAL_TITLES:
+                # Для специальных заголовков уровень всегда 1
+                level = 1
+            else:
+                if not title_text[0].isupper():
+                    continue
+                if len(title_text) < 3:
+                    continue
+                if title_text.lower().startswith(('в ', 'на ', 'по ', 'из ', 'от ', 'к ', 'с ')):
+                    continue
 
-            level = number_part.count('.') + 1
-            if level > 3:
-                level = 3
+                level = number_part.count('.') + 1
+                if level > 3:
+                    level = 3
 
-            clean_title = f"{number_part} {title_text}"
+            clean_title = f"{number_part} {title_text}" if number_part else title_text
 
             self.headings.append({
                 'text': clean_title,
@@ -132,28 +150,45 @@ class GOSTConverter:
             print(f"Не удалось создать стили: {e}")
 
     def add_heading_with_style(self, text, doc, level):
-        SPECIAL_TITLES = {"СОДЕРЖАНИЕ", "ВВЕДЕНИЕ", "ЗАКЛЮЧЕНИЕ", "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ",
+        SPECIAL_TITLES = {"СОДЕРЖАНИЕ", "ВВЕДЕНИЕ", "ЗАКЛЮЧЕНИЕ",
+                          "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ",
                           "СПИСОК ЛИТЕРАТУРЫ", "ПРИЛОЖЕНИЯ"}
 
         clean_text = text.strip()
 
-        title_part = clean_text.split(' ', 1)[-1] if ' ' in clean_text else clean_text
-        is_special = title_part.upper() in SPECIAL_TITLES
+        # Проверяем, является ли это специальным заголовком
+        is_special = clean_text.upper() in SPECIAL_TITLES
+
+        # Если заголовок содержит номер, извлекаем его
+        title_part = clean_text
+        if not is_special and ' ' in clean_text:
+            # Проверяем формат "1. ВВЕДЕНИЕ" или "ВВЕДЕНИЕ"
+            parts = clean_text.split(' ', 1)
+            if parts[0].replace('.', '').isdigit():
+                title_part = parts[1] if len(parts) > 1 else parts[0]
+            else:
+                title_part = clean_text
+
+        # Проверяем, является ли заголовок специальным (с номером или без)
+        if title_part.upper() in SPECIAL_TITLES:
+            is_special = True
 
         if level == 1 or is_special:
             display_text = clean_text.upper()
+            style = 'Heading 1 GOST'
+        elif level == 2:
+            if ' ' in clean_text:
+                num, title = clean_text.split(' ', 1)
+                display_text = f"{num} {title.strip()[0].upper() + title.strip()[1:]}"
+            else:
+                display_text = clean_text[0].upper() + clean_text[1:]
+            style = 'Heading 2 GOST'
         else:
             if ' ' in clean_text:
                 num, title = clean_text.split(' ', 1)
                 display_text = f"{num} {title.strip()[0].upper() + title.strip()[1:]}"
             else:
                 display_text = clean_text[0].upper() + clean_text[1:]
-
-        if level == 1 or is_special:
-            style = 'Heading 1 GOST'
-        elif level == 2:
-            style = 'Heading 2 GOST'
-        else:
             style = 'Heading 3 GOST'
 
         p = doc.add_paragraph(display_text, style=style)
@@ -166,14 +201,15 @@ class GOSTConverter:
         for run in p.runs:
             run.font.color.rgb = RGBColor(0, 0, 0)
 
-        # ОБНОВЛЯЕМ РАЗДЕЛ ДЛЯ НУМЕРАЦИИ ЛИСТИНГОВ
-        if level == 1:
+        # Обновляем текущий раздел для нумерации листингов
+        if level == 1 and not is_special:
             # Извлекаем номер раздела из заголовка
             match = re.match(r'^(\d+)', clean_text)
-            if match and not is_special:
+            if match:
                 self.current_section_for_listing = int(match.group(1))
-            elif is_special:
-                self.current_section_for_listing = 0  # Особые разделы без номера
+                self.listing_counter = 1  # Сбрасываем счетчик листингов
+        elif is_special:
+            self.current_section_for_listing = 0  # Особые разделы без номера
             self.listing_counter = 1  # Сбрасываем счетчик листингов
 
         return p
