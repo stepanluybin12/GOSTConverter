@@ -78,7 +78,7 @@ class ElementBuilder:
         caption_run.font.color.rgb = RGBColor(0, 0, 0)
 
         caption_para.paragraph_format.space_before = Pt(6)
-        caption_para.paragraph_format.space_after = Pt(3)
+        caption_para.paragraph_format.space_after = Pt(0)
         caption_para.paragraph_format.line_spacing = 1.0
 
         rows = len(source_table.rows)

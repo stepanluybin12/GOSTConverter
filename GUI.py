@@ -65,7 +65,7 @@ class GOSTConverterGUI:
         # Кнопка конвертации
         self.convert_btn = tk.Button(
             self.root,
-            text="🚀 Конвертировать",
+            text="Конвертировать",
             font=('Arial', 12, 'bold'),
             bg='green',
             fg='white',
@@ -165,4 +165,4 @@ class GOSTConverterGUI:
     def conversion_finished(self):
         """Завершение конвертации"""
         self.progress.stop()
-        self.convert_btn.config(state='normal', text="🚀 Конвертировать")
+        self.convert_btn.config(state='normal', text="Конвертировать")
