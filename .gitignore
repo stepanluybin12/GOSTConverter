@@ -2,5 +2,5 @@ venv/
 .venv/
 *.docx
 .idea/
-
+__pycache__/
 

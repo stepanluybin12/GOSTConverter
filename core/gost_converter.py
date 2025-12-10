@@ -41,7 +41,7 @@ class GOSTConverter:
         pattern = re.compile(
             r'^(\d+(?:\.\d+)*)'
             r'\s+'
-            r'([А-ЯA-Z].*)'
+            r'([А-Яа-яA-Za-z].*)'
             r'$',
             re.UNICODE
         )
@@ -135,7 +135,7 @@ class GOSTConverter:
         p = doc.add_paragraph(display_text, style=style)
 
         # Выравнивание
-        if is_special or level == 1:
+        if is_special:
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         else:
             p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
